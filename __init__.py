@@ -2,7 +2,7 @@ bl_info = {
     "name" : "Global Copy Nodes",
     "description" : "Copy nodes across .blend projects",
     "author" : "hisanimations",
-    "version" : (1, 0, 0),
+    "version" : (0, 0, 0),
     "blender" : (3, 5, 0),
     "location" : "Node Editor > Global Copy Nodes",
     "support" : "COMMUNITY",
@@ -38,7 +38,7 @@ node_tree_to_center: bpy.types.NodeTree = None
 
 iter_links = None
 
-map_og_to_copy = dict()
+map_og_to_copy: dict[bpy.types.Node, bpy.types.Node] = dict()
 
 def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_struct, copy: bpy.types.bpy_struct, properties: bpy.types.bpy_prop_collection, surface_scan: bool = False) -> None:
     '''
@@ -62,7 +62,7 @@ def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_st
     map_og_to_copy[original] = copy
     # make inputs the last attribute to access
     if isinstance(original, bpy.types.Node):
-        properties = sorted(properties, key=lambda a: a.identifier == 'inputs')
+        properties = sorted(properties, key=lambda a: a.identifier in {'inputs', 'outputs'})
         
     for prop in properties:
         prop_id = prop.identifier
@@ -99,9 +99,18 @@ def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_st
             prop_srna_type = prop.srna
 
             if prop_srna_type:
-                new_parameters = {param.identifier: getattr(param, 'default_array', None) or param.default
-                                  for param in prop_srna_type.functions['new'].parameters
-                                  if not param.type in {'POINTER', 'COLLECTION'}}
+                new_parameters = dict()
+                for param in prop_srna_type.functions['new'].parameters:
+                    if param.type in {'POINTER', 'COLLECTION'}: continue
+                    if hasattr(param, 'enum_items'):
+                        new_parameters[param.identifier] = param.enum_items[0].identifier
+                        continue
+                    new_parameters[param.identifier] = getattr(param, 'default_array', None) or param.default
+
+
+                #new_parameters = {param.identifier: getattr(param, 'default_array', None) or param.default
+                #                  for param in prop_srna_type.functions['new'].parameters
+                #                  if not param.type in {'POINTER', 'COLLECTION'}}
                 
                 # remove as many elements as possible
                 try:
@@ -112,8 +121,10 @@ def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_st
                 # add enough elements to match original's count
                 try:
                     for _ in range(len(original_items) - len(copy_items)):
-                        copy_items.new(**new_parameters)
+                        x = copy_items.new(**new_parameters)
+                        pass
                 except Exception as e:
+                    print(e.args[0] == 'Error: Unable to create item with this socket type\n')
                     pass
 
             for og_item, copy_item in zip(original_items, copy_items):
@@ -205,6 +216,10 @@ def copy_nodes_to_node_tree(op: bpy.types.Operator, src_node_tree: bpy.types.Nod
             new_node.node_tree = node.node_tree
         dst_nodes.append(new_node)
         map_og_to_copy[node] = new_node
+
+    for node in filter(lambda a: hasattr(a, 'paired_output'), src_nodes):
+        new_node = map_og_to_copy[node]
+        new_node.pair_with_output(map_og_to_copy[node.paired_output])
 
     # 2.
     # recursively set the properties of the copied nodes, using the original nodes as a reference
@@ -638,6 +653,7 @@ def unregister_keymaps():
     addon_keymaps.clear()
 
 def register():
+    print('retard')
     r()
     bpy.types.NODE_MT_node.append(draw_operators)
     register_keymaps()

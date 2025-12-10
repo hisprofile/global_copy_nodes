@@ -3,7 +3,7 @@ schema_version = "1.0.0"
 # Example of manifest file for a Blender extension
 # Change the values according to your extension
 id = "global_copy_nodes"
-version = "1.0.0"
+version = "0.0.0"
 name = "Global Copy Nodes"
 tagline = "Copy nodes across .blend projects"
 maintainer = "hisprofile029@gmail.com"
