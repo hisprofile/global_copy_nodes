@@ -33,6 +33,8 @@ NODE_GROUP_NAME = 'global_copy_nodes_buffer'
 DEFAULT_COLLECTION_NAME = 'Node Copy Dependencies'
 DEFAULT_COLLECTION_PROP_NAME = 'global_copy_nodes_default_collection'
 UNIQUE_ID_PROP_NAME = 'global_node_copy_unique_id'
+BUFFER_NAME = 'global_copy_nodes_buffer_info'
+BUFFER_BLEND = 'node_copy_buffer.blend'
 mouse_pos: Vector = None
 node_tree_to_center: bpy.types.NodeTree = None
 
@@ -131,7 +133,7 @@ def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_st
             try:
                 setattr(copy, prop_id, getattr(original, prop_id))
             except Exception as e:
-                #op.setter_fail_count += 1
+                op.setter_fail_count += 1
                 traceback.print_exc()
                 #op.report({'ERROR'}, 'Could not set')
                 print(f'GCN: Could not set path {repr(copy)}, {prop_id} of {type(copy)}, {type(prop)} with value {getattr(original, prop_id)}! Report to developer!\n')
@@ -268,16 +270,16 @@ class node_OT_global_clipboard_copy(Operator):
             if not os.path.exists(preferences.custom_copy_path):
                 self.report({'ERROR'}, 'The add-on\'s "Custom Copy Path" does not exist! Set it correctly in preferences!')
                 return {'CANCELLED'}
-            node_copy_buffer_path = os.path.join(preferences.custom_copy_path, 'node_copy_buffer.blend')
-            last_path_data = os.path.join(preferences.custom_copy_path, 'last_path_data')
+            node_copy_buffer_path = os.path.join(preferences.custom_copy_path, BUFFER_BLEND)
+            last_path_data = os.path.join(preferences.custom_copy_path, BUFFER_NAME)
         else:
-            node_copy_buffer_path = os.path.join(WRITE_PATH, 'node_copy_buffer.blend')
-            last_path_data = os.path.join(WRITE_PATH, 'last_path_data')
+            node_copy_buffer_path = os.path.join(WRITE_PATH, BUFFER_BLEND)
+            last_path_data = os.path.join(WRITE_PATH, BUFFER_NAME)
 
         map_og_to_copy.clear()
 
         blend_data = context.blend_data
-        node_tree = context.space_data.node_tree
+        node_tree: bpy.types.NodeTree = context.space_data.node_tree
 
         if node_tree == None: return {'CANCELLED'}
 
@@ -300,7 +302,7 @@ class node_OT_global_clipboard_copy(Operator):
         unique_id = str(uuid4())
         node_group = blend_data.node_groups.new(NODE_GROUP_NAME, tree_identifier)
         node_group.use_fake_user = True
-        node_group['global_node_copy_unique_id'] = unique_id
+        node_group[UNIQUE_ID_PROP_NAME] = unique_id
 
         copy_nodes_to_node_tree(self, node_tree, node_group, selected_nodes)
 
@@ -332,7 +334,7 @@ class node_OT_global_clipboard_paste(Operator):
 
     setter_fail_count = 0
 
-    move_modal: BoolProperty(name='Move Modal', default=False)
+    move_modal: BoolProperty(name='Move Modal', default=False, description='After pasting, use the mouse to position the nodes')
     last_pos: Vector = None
     original_offset: Vector = None
 
@@ -391,11 +393,11 @@ class node_OT_global_clipboard_paste(Operator):
             if not os.path.exists(preferences.custom_copy_path):
                 self.report({'ERROR'}, 'The add-on\'s "Custom Copy Path" does not exist! Set it correctly in preferences!')
                 return {'CANCELLED'}
-            node_copy_buffer_path = os.path.join(preferences.custom_copy_path, 'node_copy_buffer.blend')
-            last_path_data = os.path.join(preferences.custom_copy_path, 'last_path_data')
+            node_copy_buffer_path = os.path.join(preferences.custom_copy_path, BUFFER_BLEND)
+            last_path_data = os.path.join(preferences.custom_copy_path, BUFFER_NAME)
         else:
-            node_copy_buffer_path = os.path.join(WRITE_PATH, 'node_copy_buffer.blend')
-            last_path_data = os.path.join(WRITE_PATH, 'last_path_data')
+            node_copy_buffer_path = os.path.join(WRITE_PATH, BUFFER_BLEND)
+            last_path_data = os.path.join(WRITE_PATH, BUFFER_NAME)
 
         map_og_to_copy.clear()
         blend_data = context.blend_data
@@ -406,7 +408,7 @@ class node_OT_global_clipboard_paste(Operator):
         tree_identifier = node_tree.bl_idname
 
         existing_node_buffer = blend_data.node_groups.get(NODE_GROUP_NAME, dict())
-        current_unique_id = existing_node_buffer.get('global_node_copy_unique_id', '')
+        current_unique_id = existing_node_buffer.get(UNIQUE_ID_PROP_NAME, '')
 
         if os.path.exists(last_path_data):
             with open(last_path_data, 'r') as file:
@@ -422,22 +424,11 @@ class node_OT_global_clipboard_paste(Operator):
             # update: it might be better to separate the global and internal copy buffers, letting users make the most of either. regardless, the global copy buffer can behave the same as the internal, as it won't duplicate data
             # if False, we do not have the most recent copy. delete the copy buffer node group if it exists, then load the latest
             if unique_id == current_unique_id:
-                #print('unique id matches current!', unique_id)
-
-                #try:
-                #    with context.temp_override(window=context.window, area=context.area, region=context.region):
-                #        bpy.ops.node.clipboard_paste()
-                #    return {'FINISHED'}
-                #except:
-                #    # the internal copy buffer does not yet exist, but we can still rely on the current copy, as it has not been deleted! 
-                #    pass
-
                 copied_node_tree = existing_node_buffer
-
             else:
                 #print('unique id does not match current!', unique_id, current_unique_id)
-                if blend_data.node_groups.get(NODE_GROUP_NAME):
-                    blend_data.node_groups.remove(blend_data.node_groups[NODE_GROUP_NAME])
+                if existing_node_buffer:
+                    blend_data.node_groups.remove(existing_node_buffer)
                 if bpy.app.version >= (5, 0, 0):
                     with blend_data.libraries.load(node_copy_buffer_path, reuse_local_id=True) as (src, dst):
                         dst.node_groups = [NODE_GROUP_NAME]
@@ -464,9 +455,6 @@ class node_OT_global_clipboard_paste(Operator):
         #for node in new_nodes:
         #    if node.parent: continue
         #    node.location += self.mouse_pos - middle_pos
-
-        #with context.temp_override(window=context.window, area=context.area, region=context.region):
-        #    bpy.ops.node.clipboard_copy()
 
         # center nodes on a timer. should we save dimension data in the copy buffer data text file?
         bpy.app.timers.register(center_nodes_on_timer, first_interval=0.0001)
@@ -645,13 +633,11 @@ def register_keymaps():
     addon_keymaps.append((km, kmi))
 
 def unregister_keymaps():
-    wm = bpy.context.window_manager
     for km, kmi in addon_keymaps:
         km.keymap_items.remove(kmi)
     addon_keymaps.clear()
 
 def register():
-    print('retard')
     r()
     bpy.types.NODE_MT_node.append(draw_operators)
     register_keymaps()
