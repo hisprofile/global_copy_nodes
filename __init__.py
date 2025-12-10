@@ -2,7 +2,7 @@ bl_info = {
     "name" : "Global Copy Nodes",
     "description" : "Copy nodes across .blend projects",
     "author" : "hisanimations",
-    "version" : (0, 0, 0),
+    "version" : (0, 0, 1),
     "blender" : (3, 5, 0),
     "location" : "Node Editor > Global Copy Nodes",
     "support" : "COMMUNITY",
@@ -106,11 +106,6 @@ def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_st
                         new_parameters[param.identifier] = param.enum_items[0].identifier
                         continue
                     new_parameters[param.identifier] = getattr(param, 'default_array', None) or param.default
-
-
-                #new_parameters = {param.identifier: getattr(param, 'default_array', None) or param.default
-                #                  for param in prop_srna_type.functions['new'].parameters
-                #                  if not param.type in {'POINTER', 'COLLECTION'}}
                 
                 # remove as many elements as possible
                 try:
@@ -217,6 +212,9 @@ def copy_nodes_to_node_tree(op: bpy.types.Operator, src_node_tree: bpy.types.Nod
         dst_nodes.append(new_node)
         map_og_to_copy[node] = new_node
 
+
+    # extra step
+    # ensure node pairs are indeed paired
     for node in filter(lambda a: hasattr(a, 'paired_output'), src_nodes):
         new_node = map_og_to_copy[node]
         new_node.pair_with_output(map_og_to_copy[node.paired_output])
