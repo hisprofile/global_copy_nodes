@@ -15,7 +15,7 @@ import time
 import os
 import traceback
 from uuid import uuid4
-from bpy.types import Operator, Menu, AddonPreferences
+from bpy.types import Operator, AddonPreferences
 from bpy.props import StringProperty, BoolProperty
 from rna_keymap_ui import draw_kmi
 from mathutils import Vector
@@ -61,7 +61,7 @@ def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_st
     #    print(original, 'has already been accessed! but continuing anyways')
     map_og_to_copy[original] = copy
     # make inputs the last attribute to access
-    if isinstance(properties, bpy.types.Node):
+    if isinstance(original, bpy.types.Node):
         properties = sorted(properties, key=lambda a: a.identifier == 'inputs')
         
     for prop in properties:
@@ -75,7 +75,7 @@ def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_st
             'node',
             'display_shape',
             'internal_links',
-            #'location_absolute'
+            'location_absolute'
             }: continue
         if prop_id.startswith('bl_'): continue
         
@@ -125,7 +125,7 @@ def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_st
             try:
                 setattr(copy, prop_id, getattr(original, prop_id))
             except Exception as e:
-                op.setter_fail_count += 1
+                #op.setter_fail_count += 1
                 traceback.print_exc()
                 #op.report({'ERROR'}, 'Could not set')
                 print(f'GCN: Could not set path {repr(copy)}, {prop_id} of {type(copy)}, {type(prop)} with value {getattr(original, prop_id)}! Report to developer!\n')
@@ -301,9 +301,7 @@ class node_OT_global_clipboard_copy(Operator):
         with open(last_path_data, 'w+') as file:
             file.write('\n'.join([blend_data.filepath, unique_id, tree_identifier]))
 
-        #blend_data.node_groups.remove(node_group)
-
-        # copy internally too, so we don't have to use the copy buffer for the same file if someone uses this operator instead of the original
+        # copy internally too
         if preferences.copy_to_internal_buffer:
             with context.temp_override(window=context.window, area=context.area, region=context.region):
                 bpy.ops.node.clipboard_copy()
@@ -321,17 +319,55 @@ class node_OT_global_clipboard_paste(Operator):
 
     setter_fail_count = 0
 
+    move_modal: BoolProperty(name='Move Modal', default=False)
+    last_pos: Vector = None
+    original_offset: Vector = None
+
     bl_options = {'UNDO'}
 
     @classmethod
     def poll(cls, context):
         return context.area.type == 'NODE_EDITOR'
     
+    def get_mouse_in_region(self, context: bpy.types.Context, pos: Iterable):
+        x, y = context.region.view2d.region_to_view(pos[0], pos[1])
+        return Vector((x, y))
+
     def invoke(self, context, event):
         global mouse_pos
-        x, y = context.region.view2d.region_to_view(event.mouse_region_x, event.mouse_region_y)
-        mouse_pos = Vector((x, y))
+        mouse_pos = self.get_mouse_in_region(context, [event.mouse_region_x, event.mouse_region_y])
+        self.original_offset = mouse_pos.copy()
+        self.last_pos = self.original_offset.copy()
         return self.execute(context)
+    
+    def modal(self, context, event):
+        context.window.cursor_modal_set('SCROLL_XY')
+        node_tree = context.space_data.node_tree
+        nodes = [node for node in node_tree.nodes if node.select]
+
+        if event.type == 'MOUSEMOVE':
+            new_pos = self.get_mouse_in_region(context, [event.mouse_region_x, event.mouse_region_y])
+            offset = new_pos - self.last_pos
+            for node in nodes:
+                if node.parent: continue
+                node.location += offset
+            self.last_pos = new_pos
+
+        if event.type in {'RIGHTMOUSE', 'ESC'}:
+            offset = self.original_offset - self.last_pos
+            for node in nodes:
+                if node.parent: continue
+                node.location += offset
+            self.move_modal = False
+            context.window.cursor_modal_set('DEFAULT')
+            return {'FINISHED'}
+        
+        if event.type in {'LEFTMOUSE', 'RETURN'}:
+            self.move_modal = False
+            context.window.cursor_modal_set('DEFAULT')
+            return {'FINISHED'}
+        
+        return {'RUNNING_MODAL'}
 
     def execute(self, context):
         global node_tree_to_center
@@ -425,6 +461,9 @@ class node_OT_global_clipboard_paste(Operator):
         map_og_to_copy.clear()
 
         if not preferences.link_to_scene:
+            if self.move_modal:
+                context.window_manager.modal_handler_add(self)
+                return {'RUNNING_MODAL'}
             return {'FINISHED'}
         
         from bpy_extras import id_map_utils
@@ -458,7 +497,11 @@ class node_OT_global_clipboard_paste(Operator):
 
             [link_to_collection.children.link(col) for col in collections]
             [link_to_collection.objects.link(obj) for obj in objs]
-            
+        
+        if self.move_modal:
+            context.window_manager.modal_handler_add(self)
+            return {'RUNNING_MODAL'}
+        
         return {'FINISHED'}
 
 
@@ -552,8 +595,11 @@ class addon_preferences(AddonPreferences):
                 if not (kmi := km.keymap_items.get(operator.bl_idname)):
                     continue
                 draw_kmi([], kc, km, kmi, layout, 0)
-            #for km, kmi in addon_keymaps:
-            #    draw_kmi([], kc, km, kmi, layout, 0)
+
+def draw_operators(self, context):
+    self.layout.separator()
+    self.layout.operator(node_OT_global_clipboard_copy.bl_idname, icon='COPYDOWN')
+    self.layout.operator(node_OT_global_clipboard_paste.bl_idname, icon='PASTEDOWN').move_modal = True
 
 classes = [
     node_OT_global_clipboard_copy,
@@ -593,8 +639,10 @@ def unregister_keymaps():
 
 def register():
     r()
+    bpy.types.NODE_MT_node.append(draw_operators)
     register_keymaps()
 
 def unregister():
     ur()
+    bpy.types.NODE_MT_node.remove(draw_operators)
     unregister_keymaps()
