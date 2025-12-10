@@ -13,6 +13,7 @@ bl_info = {
 import bpy
 import time
 import os
+import traceback
 from uuid import uuid4
 from bpy.types import Operator, Menu, AddonPreferences
 from bpy.props import StringProperty, BoolProperty
@@ -37,22 +38,35 @@ node_tree_to_center: bpy.types.NodeTree = None
 
 iter_links = None
 
-#prohibits = {
-#    bpy.types.NodeSocket: {'
-
 map_og_to_copy = dict()
 
-def recursive_property_setter(original, copy, properties: bpy.types.bpy_prop_collection, surface_scan=False):
-    input = print
+def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_struct, copy: bpy.types.bpy_struct, properties: bpy.types.bpy_prop_collection, surface_scan: bool = False) -> None:
+    '''
+    Get attributes from the original struct, set them onto copy struct
+    
+    :param op: Operator that was called
+    :type op: bpy.types.Operator
+    :param original: The reference bpy_struct
+    :type original: bpy.types.bpy_struct
+    :param copy: The target bpy_struct
+    :type copy: bpy.types.bpy_struct
+    :param properties: bl_rna.properties of the original struct
+    :type properties: bpy.types.bpy_prop_collection
+    :param surface_scan: If False, it will proceed with the scan despite the original already being in the map dict.
+    :type surface_scan: bool
+    '''
     if (original in map_og_to_copy) and not surface_scan:
         return
     #elif original in map_og_to_copy:
     #    print(original, 'has already been accessed! but continuing anyways')
     map_og_to_copy[original] = copy
+    # make inputs the last attribute to access
+    if isinstance(properties, bpy.types.Node):
+        properties = sorted(properties, key=lambda a: a.identifier == 'inputs')
+        
     for prop in properties:
         prop_id = prop.identifier
-        #print(prop_id == 'default_value')
-        if isinstance(original, bpy.types.NodeSocket) and prop_id in {'links', 'node'}: continue
+        #if isinstance(original, bpy.types.NodeSocket) and prop_id in {'links', 'node'}: continue
         if prop_id in {
             'rna_type',
             'original',
@@ -64,78 +78,75 @@ def recursive_property_setter(original, copy, properties: bpy.types.bpy_prop_col
             #'location_absolute'
             }: continue
         if prop_id.startswith('bl_'): continue
-        #input((prop_id, repr(original), repr(copy)))
+        
         if prop.type == 'POINTER':
             if prop.is_readonly:
-                #input((prop_id, repr(original), repr(copy), 'is readonly'))
                 original_prop = getattr(original, prop_id)
                 copy_prop = getattr(copy, prop_id)
-                recursive_property_setter(original_prop, copy_prop, prop.fixed_type.properties)
+
+                recursive_property_setter(op, original_prop, copy_prop, prop.fixed_type.properties, False)
+
+                # i don't like unique handling cases, but this seems to be necessary. i don't think it's too disruptive to implement anyways
                 if isinstance(copy_prop, bpy.types.CurveMapping):
                     copy_prop.update()
             else:
-                #input((prop_id, repr(original), repr(copy), 'can be set'))
                 pointer_value = getattr(original, prop_id)
                 setattr(copy, prop_id, map_og_to_copy.get(pointer_value, pointer_value))
-            continue
-        if prop.type == 'COLLECTION':
+
+        elif prop.type == 'COLLECTION':
             original_items = getattr(original, prop_id)
             copy_items = getattr(copy, prop_id)
-            #print(original, original_items, copy, copy_items)
             prop_srna_type = prop.srna
-            #print(original, prop_id, prop)
+
             if prop_srna_type:
                 new_parameters = {param.identifier: getattr(param, 'default_array', None) or param.default
                                   for param in prop_srna_type.functions['new'].parameters
                                   if not param.type in {'POINTER', 'COLLECTION'}}
-                #print(new_parameters)
-                #print('collection can be added to', new_parameters)
+                
+                # remove as many elements as possible
                 try:
-                    #copy_items.clear()
                     [copy_items.remove(item) for item in copy_items[1:]]
                 except:
                     pass
+                
+                # add enough elements to match original's count
                 try:
                     for _ in range(len(original_items) - len(copy_items)):
                         copy_items.new(**new_parameters)
-                        #print(x)
                 except Exception as e:
-                    #raise
-                    #print(e)ab
                     pass
-                #print('don\'t think collection can be added to')
-            #print(prop_fixed_type, list(prop_fixed_type.properties))
+
             for og_item, copy_item in zip(original_items, copy_items):
-                #copy_item = copy_items.get(item.
-                #print(og_item, copy_item, 'penis')
-                #input((prop_id, repr(original), repr(copy), 'item'))
-                recursive_property_setter(og_item, copy_item, og_item.bl_rna.properties)
+                recursive_property_setter(op, og_item, copy_item, og_item.bl_rna.properties, False)
             
-            continue
-        if prop.is_readonly:
-            #input((prop_id, repr(original), repr(copy), 'bool/str/float/int readonly'))
-            continue
-        #input((prop_id, repr(original), repr(copy)))
-        #print(original, copy, prop_id)
-        try:
-            setattr(copy, prop_id, getattr(original, prop_id))
-        except:
-            print(original, prop_id)
-        
-    pass
+        else:
+            if prop.is_readonly:
+                continue
+            try:
+                setattr(copy, prop_id, getattr(original, prop_id))
+            except Exception as e:
+                op.setter_fail_count += 1
+                traceback.print_exc()
+                #op.report({'ERROR'}, 'Could not set')
+                print(f'GCN: Could not set path {repr(copy)}, {prop_id} of {type(copy)}, {type(prop)} with value {getattr(original, prop_id)}! Report to developer!\n')
 
 
 def get_center_location_of_nodes(nodes: Iterable[bpy.types.Node]) -> Vector:
-    """
-    Get the center point of all the nodes
-    """
+    '''
+    Get the middle point of all the nodes.  
+    It might be good to run on a timer, letting the nodes draw and get their dimensions property
+    
+    :param nodes: List of nodes to find the center of
+    :type nodes: Iterable[bpy.types.Node]
+    :return: Center point of all the nodes
+    :rtype: Vector
+    '''
     from math import inf
     minimum = Vector((inf, inf))
     maximum = Vector((-inf, -inf))
 
     for node in nodes:
         if node.parent: continue
-        print(node.dimensions)
         loc = node.location
         width, height = node.dimensions[0], node.dimensions[1]
         corners = [
@@ -152,16 +163,93 @@ def get_center_location_of_nodes(nodes: Iterable[bpy.types.Node]) -> Vector:
 
     return middle
 
+
+def center_nodes_on_timer():
+    '''
+    Register this function on a timer with a small interval, letting the nodes draw.
+    Access the node tree to modify using the global variable "node_tree_to_center", and use the global variable "mouse_pos" to know where to center to
+    '''
+    node_tree = node_tree_to_center
+    nodes = [node for node in node_tree.nodes if node.select]
+
+    middle_pos = get_center_location_of_nodes(nodes)
+
+    for node in nodes:
+        if node.parent: continue
+        node.location += mouse_pos - middle_pos
+
+    return None
+
+def copy_nodes_to_node_tree(op: bpy.types.Operator, src_node_tree: bpy.types.NodeTree, dst_node_tree: bpy.types.NodeTree, src_nodes: list[bpy.types.Node]) -> list[bpy.types.Node]:
+    '''
+    Recursively copy nodes from one node tree into another, using bl_rna properties and a list of source nodes
+    
+    :param op: Operator that was called
+    :type op: bpy.types.Operator
+    :param src_node_tree: Source Node Tree
+    :type src_node_tree: bpy.types.NodeTree
+    :param dst_node_tree: Destination Node Tree
+    :type dst_node_tree: bpy.types.NodeTree
+    :param src_nodes: Nodes to copy from
+    :type src_nodes: list[bpy.types.Node]
+    :return: The new copied nodes
+    :rtype: list[Node]
+    '''
+    dst_nodes: list[bpy.types.Node] = list()
+        
+    # 1.
+    # make copies of nodes, and map the original to the copies
+    for node in src_nodes:
+        new_node = dst_node_tree.nodes.new(node.bl_idname)
+        if hasattr(node, 'node_tree'):
+            new_node.node_tree = node.node_tree
+        dst_nodes.append(new_node)
+        map_og_to_copy[node] = new_node
+
+    # 2.
+    # recursively set the properties of the copied nodes, using the original nodes as a reference
+    # set the parent to make positioning more convenient
+    for node, new_node in zip(src_nodes, dst_nodes):
+        setattr(new_node, 'parent', map_og_to_copy.get(node.parent, None))
+        recursive_property_setter(op, node, new_node, node.bl_rna.properties, True)
+
+    # 3.
+    # update the mapping for original inputs/outputs to the copied inputs/outputs
+    # it seems this should be done after properties are set. i've found odd cases where the socket data is seemingly offset in memory. maybe because of dynamic sockets?
+    # in the mapping dictionary, it lead to an output referencing itself. no idea how that works, but we want to make sure we have the most updated references
+    for node in list(src_nodes):
+        counter_part = map_og_to_copy[node]
+        for inp1, inp2 in zip(node.inputs, counter_part.inputs):
+            map_og_to_copy[inp1] = inp2
+        for out1, out2 in zip(node.outputs, counter_part.outputs):
+            map_og_to_copy[out1] = out2
+
+    # 4.
+    # make the links!
+    for link in src_node_tree.links:
+        if not ((link.from_node in src_nodes) and (link.to_node in src_nodes)):
+            continue
+        
+        from_socket = map_og_to_copy[link.from_socket]
+        to_socket = map_og_to_copy[link.to_socket]
+        dst_node_tree.links.new(from_socket, to_socket)
+
+    return dst_nodes
+
+
 class node_OT_global_clipboard_copy(Operator):
     bl_idname = 'node.global_clipboard_copy'
     bl_label = 'Global Copy Nodes'
     bl_description = 'Copy the nodes globally to paste into another project'
+
+    setter_fail_count = 0
 
     @classmethod
     def poll(cls, context):
         return context.area.type == 'NODE_EDITOR'
 
     def execute(self, context):
+        self.setter_fail_count = 0
         preferences = context.preferences.addons[BASE_PACKAGE].preferences
         if preferences.use_custom_copy_path:
             if not os.path.exists(preferences.custom_copy_path):
@@ -181,108 +269,59 @@ class node_OT_global_clipboard_copy(Operator):
         if node_tree == None: return {'CANCELLED'}
 
         tree_identifier = node_tree.bl_idname
-        selected_nodes = set(node for node in node_tree.nodes if node.select)# + set(node.parent for node in node_tree.nodes if node.select)
-        parent_nodes = set(node.parent for node in selected_nodes)
-        parent_nodes.discard(None)
-        selected_nodes.update(parent_nodes)
-        #print(selected_nodes, parent_nodes)
-        #(selected_nodes.add(node.parent) for node in set(selected_nodes))
-        #selected_nodes.discard(None)
-        selected_nodes = list(selected_nodes)
-        #[selected_nodes.add(node.parent) for node in set(selected_nodes)]
-        copy_counterparts = list()
 
+        selected_nodes = set(node for node in node_tree.nodes if node.select)
         if not selected_nodes: return {'CANCELLED'}
+
+        parent_nodes = set(node.parent for node in selected_nodes)
+        selected_nodes.update(parent_nodes)
+        selected_nodes.discard(None)
+        del parent_nodes
+
+        selected_nodes = list(selected_nodes)
 
         if blend_data.node_groups.get(NODE_GROUP_NAME):
             blend_data.node_groups.remove(blend_data.node_groups[NODE_GROUP_NAME])
 
-        node_group = blend_data.node_groups.new(NODE_GROUP_NAME, tree_identifier)
-        node_group.use_fake_user = True
-
         # we will always keep the pasted nodes, so lets compare uuid4 tags against latest & current (if pasted before) to check for an update
         unique_id = str(uuid4())
+        node_group = blend_data.node_groups.new(NODE_GROUP_NAME, tree_identifier)
+        node_group.use_fake_user = True
         node_group['global_node_copy_unique_id'] = unique_id
-        #context.window_manager['global_node_copy_unique_id'] = unique_id
-        #print(map_og_to_copy)
-        for node in selected_nodes:
-            new_node = node_group.nodes.new(node.bl_idname)
-            if hasattr(node, 'node_tree'):
-                new_node.node_tree = node.node_tree
-            copy_counterparts.append(new_node)
-            map_og_to_copy[node] = new_node
 
-        for node, new_node in zip(selected_nodes, copy_counterparts):
-            setattr(new_node, 'parent', map_og_to_copy.get(node.parent, None))
-            recursive_property_setter(node, new_node, node.bl_rna.properties, True)
-            #recursive_property_setter(node, new_node, node.bl_rna.properties)
-            #print(map_og_to_copy)
-            #node_group.update()
+        copy_nodes_to_node_tree(self, node_tree, node_group, selected_nodes)
 
-        for node in list(selected_nodes):
-            counter_part = map_og_to_copy[node]
-            for inp1, inp2 in zip(node.inputs, counter_part.inputs):
-                map_og_to_copy[inp1] = inp2
-            for inp1, inp2 in zip(node.outputs, counter_part.outputs):
-                map_og_to_copy[inp1] = inp2
-        #[print(repr(key), repr(value), 'gay') for key, value in map_og_to_copy.items()]
-        for link in node_tree.links:
-            if not ((link.from_node in selected_nodes) and (link.to_node in selected_nodes)):
-                continue
-            #print(repr(link.from_socket), repr(link.to_socket))
-            #print(map_og_to_copy.get(link.from_node))
-            #print(map_og_to_copy.get(link.to_node))
-            from_socket = map_og_to_copy[link.from_socket]
-            to_socket = map_og_to_copy[link.to_socket]
-            #print(repr(from_socket), repr(to_socket))
-            #print(dir(link))
-            #print(link.is_valid, link.multi_input_sort_id)
-            try:
-                node_group.links.new(from_socket, to_socket)
-            except:
-                #print(from_socket, to_socket, link.from_node, link.to_node, link.from_socket, link.to_socket)
-                #raise
-                continue
-        map_og_to_copy.clear()
-        return {'FINISHED'}
-        #[print(repr(key), repr(value), 'gay') for key, value in map_og_to_copy.items()]
+        if self.setter_fail_count:
+            self.report({'ERROR'}, f'Failed to set {self.setter_fail_count} value(s). Open console and report errors to developer!')
 
         map_og_to_copy.clear()
 
         blend_data.libraries.write(node_copy_buffer_path, {node_group})#, path_remap='RELATIVE_ALL', compress=True
 
         with open(last_path_data, 'w+') as file:
-            file.write(blend_data.filepath + '\n' + unique_id)
+            file.write('\n'.join([blend_data.filepath, unique_id, tree_identifier]))
 
         #blend_data.node_groups.remove(node_group)
 
         # copy internally too, so we don't have to use the copy buffer for the same file if someone uses this operator instead of the original
-        with context.temp_override(window=context.window, area=context.area, region=context.region):
-            bpy.ops.node.clipboard_copy()
-
-        self.report({'INFO'}, 'Nodes copied globally & internally')
+        if preferences.copy_to_internal_buffer:
+            with context.temp_override(window=context.window, area=context.area, region=context.region):
+                bpy.ops.node.clipboard_copy()
+            self.report({'INFO'}, 'Nodes copied globally & internally')
+        else:
+            self.report({'INFO'}, 'Nodes copied globally')
 
         return {'FINISHED'}
-
-def center_nodes_on_timer():
-    node_tree = node_tree_to_center
-    nodes = [node for node in node_tree.nodes if node.select]
-
-    middle_pos = get_center_location_of_nodes(nodes)
-
-    for node in nodes:
-        print(node.dimensions)
-        if node.parent: continue
-        node.location += mouse_pos - middle_pos
-
-    return None
+    
 
 class node_OT_global_clipboard_paste(Operator):
     bl_idname = 'node.global_clipboard_paste'
     bl_label = 'Global Paste Nodes'
     bl_description = 'Paste nodes that were copied from another file'
 
-    #mouse_pos: Vector = None
+    setter_fail_count = 0
+
+    bl_options = {'UNDO'}
 
     @classmethod
     def poll(cls, context):
@@ -297,6 +336,7 @@ class node_OT_global_clipboard_paste(Operator):
     def execute(self, context):
         global node_tree_to_center
 
+        self.setter_fail_count = 0
         preferences = context.preferences.addons[BASE_PACKAGE].preferences
         if preferences.use_custom_copy_path:
             if not os.path.exists(preferences.custom_copy_path):
@@ -307,31 +347,34 @@ class node_OT_global_clipboard_paste(Operator):
         else:
             node_copy_buffer_path = os.path.join(WRITE_PATH, 'node_copy_buffer.blend')
             last_path_data = os.path.join(WRITE_PATH, 'last_path_data')
-        map_og_to_copy.clear()
 
         map_og_to_copy.clear()
         blend_data = context.blend_data
         node_tree = context.space_data.node_tree
         if node_tree == None: return {'CANCELLED'}
+
         node_tree_to_center = node_tree
         tree_identifier = node_tree.bl_idname
 
         existing_node_buffer = blend_data.node_groups.get(NODE_GROUP_NAME, dict())
         current_unique_id = existing_node_buffer.get('global_node_copy_unique_id', '')
+
         if os.path.exists(last_path_data):
             with open(last_path_data, 'r') as file:
-                last_copied_path, unique_id = file.read().split('\n')
+                last_copied_path, unique_id, buffer_tree_identifier = file.read().split('\n')
+
+            try:
+                assert buffer_tree_identifier == tree_identifier
+            except AssertionError:
+                self.report({'ERROR'}, 'Copied node tree type does not match the active node tree!')
+                return {'CANCELLED'}
             
             # if True, we have the most recent copy, but we should prioritize internal copy buffer. as a fallback, use the existing copy buffer, as it exists
+            # update: it might be better to separate the global and internal copy buffers, letting users make the most of either. regardless, the global copy buffer can behave the same as the internal, as it won't duplicate data
             # if False, we do not have the most recent copy. delete the copy buffer node group if it exists, then load the latest
             if unique_id == current_unique_id:
-                print('unique id matches current!', unique_id)
-                try:
-                    assert tree_identifier == existing_node_buffer.bl_idname
-                except AssertionError:
-                    self.report({'ERROR'}, 'Copied node tree type does not match the active node tree!')
-                    return {'CANCELLED'}
-                
+                #print('unique id matches current!', unique_id)
+
                 #try:
                 #    with context.temp_override(window=context.window, area=context.area, region=context.region):
                 #        bpy.ops.node.clipboard_paste()
@@ -339,10 +382,11 @@ class node_OT_global_clipboard_paste(Operator):
                 #except:
                 #    # the internal copy buffer does not yet exist, but we can still rely on the current copy, as it has not been deleted! 
                 #    pass
+
                 copied_node_tree = existing_node_buffer
 
             else:
-                print('unique id does not match current!', unique_id, current_unique_id)
+                #print('unique id does not match current!', unique_id, current_unique_id)
                 if blend_data.node_groups.get(NODE_GROUP_NAME):
                     blend_data.node_groups.remove(blend_data.node_groups[NODE_GROUP_NAME])
                 if bpy.app.version >= (5, 0, 0):
@@ -355,42 +399,28 @@ class node_OT_global_clipboard_paste(Operator):
         else:
             self.report({'ERROR'}, 'The global clipboard is empty')
             return {'CANCELLED'}
-        print('PASTING GLOBALLY')
 
         copied_node_tree.use_fake_user = True
 
-        if copied_node_tree.bl_idname != tree_identifier:
-            self.report({'ERROR'}, 'Copied node tree type does not match active node tree!')
-            blend_data.node_groups.remove(copied_node_tree)
-            return {'CANCELLED'}
-        
-        new_nodes = set()
+        new_nodes = copy_nodes_to_node_tree(self, copied_node_tree, node_tree, list(copied_node_tree.nodes))
 
-        for node in copied_node_tree.nodes:
-            new_node = node_tree.nodes.new(node.bl_idname)
-            new_nodes.add(new_node)
-            if hasattr(node, 'node_tree'):
-                new_node.node_tree = node.node_tree
-            recursive_property_setter(node, new_node, node.bl_rna.properties)
-
-        for link in copied_node_tree.links:
-            from_socket = map_og_to_copy[link.from_socket]
-            to_socket = map_og_to_copy[link.to_socket]
-            node_tree.links.new(from_socket, to_socket)
+        if self.setter_fail_count:
+            self.report({'ERROR'}, f'Failed to set {self.setter_fail_count} value(s). Open console and report errors to developer!')
 
         [setattr(node, 'select', False) for node in node_tree.nodes]
         [setattr(node, 'select', True) for node in new_nodes]
 
-        bpy.app.timers.register(center_nodes_on_timer, first_interval=0.0001)
-
         #middle_pos = get_center_location_of_nodes(new_nodes)
-#
+
         #for node in new_nodes:
         #    if node.parent: continue
         #    node.location += self.mouse_pos - middle_pos
 
         #with context.temp_override(window=context.window, area=context.area, region=context.region):
         #    bpy.ops.node.clipboard_copy()
+
+        # center nodes on a timer. should we save dimension data in the copy buffer data text file?
+        bpy.app.timers.register(center_nodes_on_timer, first_interval=0.0001)
 
         map_og_to_copy.clear()
 
@@ -399,17 +429,25 @@ class node_OT_global_clipboard_paste(Operator):
         
         from bpy_extras import id_map_utils
 
-        ref_map = id_map_utils.get_id_reference_map()
+        # 1.
+        # get all IDs associated with the imported nodes
+        ref_map: dict[bpy.types.ID, set[bpy.types.ID]] = id_map_utils.get_id_reference_map()
         referenced_ids: set[bpy.types.ID] = id_map_utils.get_all_referenced_ids(copied_node_tree, ref_map)
 
+        # 2.
+        # filter objects and collections
         objs: set[bpy.types.Object] = set(filter(lambda a: isinstance(a, bpy.types.Object), referenced_ids))
         collections: set[bpy.types.Collection] = set(filter(lambda a: isinstance(a, bpy.types.Collection), referenced_ids))
 
+        # 3.
+        # more filtering
         [collections.difference_update(set(col.children_recursive)) for col in list(collections)] # get only the top collections
         [objs.difference_update(set(col.all_objects)) for col in collections] # get objects that are not a part of any attached collection
-        collections.difference_update(set(context.scene.collection.children_recursive))
-        objs.difference_update(set(context.scene.objects))
+        collections.difference_update(set(context.scene.collection.children_recursive)) # remove collections that are associated with the active scene (if pasted more than once from the same copy)
+        objs.difference_update(set(context.scene.objects)) # remove objects that are associated with the active scene (if pasted more than once from the same copy)
 
+        # 4.
+        # link to scene if there are any valid objects or collections
         if objs or collections:
             link_to_collection = context.scene.collection
             if preferences.create_collections:
@@ -417,6 +455,7 @@ class node_OT_global_clipboard_paste(Operator):
                     link_to_collection = blend_data.collections.new(DEFAULT_COLLECTION_NAME)
                     context.scene['global_copy_nodes_default_collection'] = link_to_collection
                     context.scene.collection.children.link(link_to_collection)
+
             [link_to_collection.children.link(col) for col in collections]
             [link_to_collection.objects.link(obj) for obj in objs]
             
@@ -437,17 +476,38 @@ class global_copy_nodes_OT_temp_path_setter(Operator):
 class addon_preferences(AddonPreferences):
     bl_idname = BASE_PACKAGE
 
-    use_custom_copy_path: BoolProperty(name='Use Custom Copy Path', description='Use a custom path to store the node copy buffer, making it easier to sync copies across different versions')
-    custom_copy_path: StringProperty(name='Custom Copy Path', description='The custom path to store node copy buffers, making it easier to sync copies across different versions', subtype='DIR_PATH')
-    link_to_scene: BoolProperty(name='Automatically Link To Scene', description='Link attached objects or collections to the scene', default=True)
-    create_collections: BoolProperty(name='Create Collections For Attached Objects', description='Create a collection to assign attached objects/collections to, for organization purposes', default=True)
+    use_custom_copy_path: BoolProperty(
+        name='Use Custom Copy Path', 
+        description='Use a custom path to store the node copy buffer, making it easier to sync copies across different versions',
+        default=False
+    )
+    custom_copy_path: StringProperty(
+        name='Custom Copy Path',
+        description='The custom path to store node copy buffers, making it easier to sync copies across different versions',
+        subtype='DIR_PATH'
+    )
+    link_to_scene: BoolProperty(
+        name='Automatically Link To Scene',
+        description='Link attached objects or collections to the scene',
+        default=True
+    )
+    create_collections: BoolProperty(
+        name='Create Collections For Attached Objects',
+        description='Create a collection to assign attached objects/collections to, for organization purposes',
+        default=True
+    )
+    copy_to_internal_buffer: BoolProperty(
+        name='Copy To Internal Buffer',
+        description='If True, the add-on will copy to both the global and internal buffer. If False, then only the global buffer',
+        default=True
+    )
 
-    def draw(self, context):
+    def draw(self, context: bpy.types.Context):
         layout = self.layout
         col = layout.column(align=False)
+        
         col.label(text='Custom Copy Path')
         box = col.box()
-
         box.prop(self, 'use_custom_copy_path')
 
         main = box.row(align=False)
@@ -456,9 +516,11 @@ class addon_preferences(AddonPreferences):
         row = main.row(align=True)
         row.alignment = 'LEFT'
         row.label(text='Custom Copy Path:')
+        
         row = main.row()
         row.alignment = 'EXPAND'
         row.prop(self, 'custom_copy_path', text='')
+        
         row = main.row()
         row.alignment = 'RIGHT'
         row.operator('global_copy_nodes.temp_path_setter', icon='FILEBROWSER')
@@ -466,18 +528,32 @@ class addon_preferences(AddonPreferences):
         col = layout.column(align=False)
         col.label(text='Link to Scene')
         box = col.box()
+        
         row = box.row()
         row.prop(self, 'link_to_scene')
+        
         row = box.row()
         row.enabled = self.link_to_scene
         row.prop(self, 'create_collections')
 
+        col = layout.column()
+        col.prop(self, 'copy_to_internal_buffer')
+
         wm = context.window_manager
-        kc = wm.keyconfigs.addon
-        if kc:
+        kc = wm.keyconfigs.user
+        km: bpy.types.KeyMap = kc.keymaps.get('Node Editor')
+        if kc and km:
             layout.label(text="Custom Keymap Assignments:")
-            for km, kmi in addon_keymaps:
+            for operator in [
+                node_OT_global_clipboard_copy,
+                node_OT_global_clipboard_paste
+            ]:
+                
+                if not (kmi := km.keymap_items.get(operator.bl_idname)):
+                    continue
                 draw_kmi([], kc, km, kmi, layout, 0)
+            #for km, kmi in addon_keymaps:
+            #    draw_kmi([], kc, km, kmi, layout, 0)
 
 classes = [
     node_OT_global_clipboard_copy,
@@ -495,12 +571,19 @@ def register_keymaps():
     wm = bpy.context.window_manager
     kc = wm.keyconfigs.addon
     km = kc.keymaps.new(name='Node Editor', space_type='NODE_EDITOR', region_type='WINDOW')
+    kmis = km.keymap_items
 
-    kmi_global_copy = km.keymap_items.new('node.global_clipboard_copy', 'C', 'PRESS', shift=True, ctrl=True, repeat=False)
-    addon_keymaps.append((km, kmi_global_copy))
+    if not (kmi := kmis.get(node_OT_global_clipboard_copy.bl_idname)):
+        kmi = km.keymap_items.new(node_OT_global_clipboard_copy.bl_idname, 'C', 'PRESS', shift=True, ctrl=True, repeat=False)
+    else:
+        kmi.idname = node_OT_global_clipboard_copy.bl_idname
+    addon_keymaps.append((km, kmi))
 
-    kmi_global_paste = km.keymap_items.new('node.global_clipboard_paste', 'V', 'PRESS', shift=True, ctrl=True, repeat=False)
-    addon_keymaps.append((km, kmi_global_paste))
+    if not (kmi := kmis.get(node_OT_global_clipboard_paste.bl_idname)):
+        kmi = km.keymap_items.new(node_OT_global_clipboard_paste.bl_idname, 'V', 'PRESS', shift=True, ctrl=True, repeat=False)
+    else:
+        kmi.idname = node_OT_global_clipboard_paste.bl_idname
+    addon_keymaps.append((km, kmi))
 
 def unregister_keymaps():
     wm = bpy.context.window_manager
@@ -511,9 +594,7 @@ def unregister_keymaps():
 def register():
     r()
     register_keymaps()
-    print('REGISTERING')
 
 def unregister():
     ur()
     unregister_keymaps()
-    print('UNREGISTERING')
