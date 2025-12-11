@@ -2,7 +2,7 @@ bl_info = {
     "name" : "Global Copy Nodes",
     "description" : "Copy nodes across .blend projects",
     "author" : "hisanimations",
-    "version" : (0, 0, 1),
+    "version" : (1, 0, 0),
     "blender" : (3, 5, 0),
     "location" : "Node Editor > Global Copy Nodes",
     "support" : "COMMUNITY",
@@ -59,10 +59,10 @@ def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_st
     '''
     if (original in map_og_to_copy) and not surface_scan:
         return
-    #elif original in map_og_to_copy:
-    #    print(original, 'has already been accessed! but continuing anyways')
+    
     map_og_to_copy[original] = copy
-    # make inputs the last attribute to access
+
+    # make inputs and outputs the last attribute to access
     if isinstance(original, bpy.types.Node):
         properties = sorted(properties, key=lambda a: a.identifier in {'inputs', 'outputs'})
         
@@ -118,10 +118,9 @@ def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_st
                 # add enough elements to match original's count
                 try:
                     for _ in range(len(original_items) - len(copy_items)):
-                        x = copy_items.new(**new_parameters)
+                        copy_items.new(**new_parameters)
                         pass
                 except Exception as e:
-                    print(e.args[0] == 'Error: Unable to create item with this socket type\n')
                     pass
 
             for og_item, copy_item in zip(original_items, copy_items):
@@ -130,13 +129,15 @@ def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_st
         else:
             if prop.is_readonly:
                 continue
+            if not ((hasattr(original, prop_id)) and (hasattr(copy, prop_id))):
+                continue
             try:
                 setattr(copy, prop_id, getattr(original, prop_id))
             except Exception as e:
                 op.setter_fail_count += 1
                 traceback.print_exc()
                 #op.report({'ERROR'}, 'Could not set')
-                print(f'GCN: Could not set path {repr(copy)}, {prop_id} of {type(copy)}, {type(prop)} with value {getattr(original, prop_id)}! Report to developer!\n')
+                print(f'GCN: Could not set path {repr(copy)}, {prop_id} of types {type(copy)}, {type(prop)} with value {getattr(original, prop_id)}! Report to developer!\n')
 
 
 def get_center_location_of_nodes(nodes: Iterable[bpy.types.Node]) -> Vector:
@@ -311,7 +312,7 @@ class node_OT_global_clipboard_copy(Operator):
 
         map_og_to_copy.clear()
 
-        blend_data.libraries.write(node_copy_buffer_path, {node_group})#, path_remap='RELATIVE_ALL', compress=True
+        blend_data.libraries.write(node_copy_buffer_path, {node_group}, path_remap='ABSOLUTE', compress=True)
 
         with open(last_path_data, 'w+') as file:
             file.write('\n'.join([blend_data.filepath, unique_id, tree_identifier]))
@@ -355,18 +356,26 @@ class node_OT_global_clipboard_paste(Operator):
         self.last_pos = self.original_offset.copy()
         return self.execute(context)
     
+    def update_node_position(self, context, event, nodes):
+        new_pos = self.get_mouse_in_region(context, [event.mouse_region_x, event.mouse_region_y])
+        offset = new_pos - self.last_pos
+        for node in nodes:
+            if node.parent: continue
+            node.location += offset
+        self.last_pos = new_pos
+    
     def modal(self, context, event):
         context.window.cursor_modal_set('SCROLL_XY')
         node_tree = context.space_data.node_tree
         nodes = [node for node in node_tree.nodes if node.select]
 
         if event.type == 'MOUSEMOVE':
-            new_pos = self.get_mouse_in_region(context, [event.mouse_region_x, event.mouse_region_y])
-            offset = new_pos - self.last_pos
-            for node in nodes:
-                if node.parent: continue
-                node.location += offset
-            self.last_pos = new_pos
+            self.update_node_position(context, event, nodes)
+            return {'RUNNING_MODAL'}
+
+        if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
+            self.update_node_position(context, event, nodes)
+            return {'PASS_THROUGH'}
 
         if event.type in {'RIGHTMOUSE', 'ESC'}:
             offset = self.original_offset - self.last_pos
@@ -389,12 +398,14 @@ class node_OT_global_clipboard_paste(Operator):
 
         self.setter_fail_count = 0
         preferences = context.preferences.addons[BASE_PACKAGE].preferences
+
         if preferences.use_custom_copy_path:
             if not os.path.exists(preferences.custom_copy_path):
                 self.report({'ERROR'}, 'The add-on\'s "Custom Copy Path" does not exist! Set it correctly in preferences!')
                 return {'CANCELLED'}
             node_copy_buffer_path = os.path.join(preferences.custom_copy_path, BUFFER_BLEND)
             last_path_data = os.path.join(preferences.custom_copy_path, BUFFER_NAME)
+
         else:
             node_copy_buffer_path = os.path.join(WRITE_PATH, BUFFER_BLEND)
             last_path_data = os.path.join(WRITE_PATH, BUFFER_NAME)
@@ -430,12 +441,13 @@ class node_OT_global_clipboard_paste(Operator):
                 if existing_node_buffer:
                     blend_data.node_groups.remove(existing_node_buffer)
                 if bpy.app.version >= (5, 0, 0):
-                    with blend_data.libraries.load(node_copy_buffer_path, reuse_local_id=True) as (src, dst):
+                    with blend_data.libraries.load(node_copy_buffer_path, relative=True, reuse_local_id=True) as (src, dst):
                         dst.node_groups = [NODE_GROUP_NAME]
                 else:
-                    with blend_data.libraries.load(node_copy_buffer_path) as (src, dst):
+                    with blend_data.libraries.load(node_copy_buffer_path, relative=True) as (src, dst):
                         dst.node_groups = [NODE_GROUP_NAME]
                 copied_node_tree = dst.node_groups[0]
+                
         else:
             self.report({'ERROR'}, 'The global clipboard is empty')
             return {'CANCELLED'}
