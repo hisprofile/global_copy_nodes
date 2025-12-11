@@ -2,16 +2,15 @@ bl_info = {
     "name" : "Global Copy Nodes",
     "description" : "Copy nodes across .blend projects",
     "author" : "hisanimations",
-    "version" : (1, 0, 0),
+    "version" : (1, 0, 1),
     "blender" : (3, 5, 0),
     "location" : "Node Editor > Global Copy Nodes",
     "support" : "COMMUNITY",
-    "category" : "Porting",
-    #"doc_url": "https://github.com/hisprofile/TF2-Trifecta/blob/main/README.md"
+    "category" : "Node",
+    "doc_url": "https://github.com/hisprofile/global_copy_nodes/blob/main/README.md"
 }
 
 import bpy
-import time
 import os
 import traceback
 from uuid import uuid4
@@ -136,7 +135,6 @@ def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_st
             except Exception as e:
                 op.setter_fail_count += 1
                 traceback.print_exc()
-                #op.report({'ERROR'}, 'Could not set')
                 print(f'GCN: Could not set path {repr(copy)}, {prop_id} of types {type(copy)}, {type(prop)} with value {getattr(original, prop_id)}! Report to developer!\n')
 
 
