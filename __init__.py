@@ -2,7 +2,7 @@ bl_info = {
     "name" : "Global Copy Nodes",
     "description" : "Copy nodes across .blend projects",
     "author" : "hisanimations",
-    "version" : (1, 0, 1),
+    "version" : (1, 0, 2),
     "blender" : (3, 5, 0),
     "location" : "Node Editor > Global Copy Nodes",
     "support" : "COMMUNITY",
@@ -92,7 +92,20 @@ def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_st
                     copy_prop.update()
             else:
                 pointer_value = getattr(original, prop_id)
-                setattr(copy, prop_id, map_og_to_copy.get(pointer_value, pointer_value))
+                pointer_value = map_og_to_copy.get(pointer_value, pointer_value) # get the corresponding value if possible
+                pointer_fixed_type = type(prop.fixed_type)
+
+                if not isinstance(pointer_value, pointer_fixed_type):
+                    continue
+                    # this seems to happen with the Field to Grid node.
+                    # the node's "active_item" attribute expects a bpy.types.RepeatItem type, yet when accessed, 
+                    # it's clearly grabbing from the node's "grid_items" collection.
+
+                    # this is the first time i've seen a property return a different value type than what it's expected to have.
+                    # so as a check, just make sure that the value we want to set with matches the type the pointer expects. otherwise, exception
+
+                setattr(copy, prop_id, pointer_value)
+
 
         elif prop.type == 'COLLECTION':
             original_items = getattr(original, prop_id)
@@ -207,6 +220,9 @@ def copy_nodes_to_node_tree(op: bpy.types.Operator, src_node_tree: bpy.types.Nod
     # 1.
     # make copies of nodes, and map the original to the copies
     for node in src_nodes:
+        if isinstance(node, (bpy.types.NodeGroupInput, bpy.types.NodeGroupOutput)):
+            dst_nodes.append(None)
+            continue
         new_node = dst_node_tree.nodes.new(node.bl_idname)
         if hasattr(node, 'node_tree'):
             new_node.node_tree = node.node_tree
@@ -224,29 +240,113 @@ def copy_nodes_to_node_tree(op: bpy.types.Operator, src_node_tree: bpy.types.Nod
     # recursively set the properties of the copied nodes, using the original nodes as a reference
     # set the parent to make positioning more convenient
     for node, new_node in zip(src_nodes, dst_nodes):
+        if isinstance(node, (bpy.types.NodeGroupInput, bpy.types.NodeGroupOutput)):
+            continue
         setattr(new_node, 'parent', map_og_to_copy.get(node.parent, None))
+
+        if isinstance(node, bpy.types.NodeReroute):
+            new_node.location = node.location
+            new_node.label = node.label
+            continue
+
         recursive_property_setter(op, node, new_node, node.bl_rna.properties, True)
 
+    map_socket_indices = dict()
+    reroute_group_placeholders: list[bpy.types.NodeReroute] = list()
+
     # 3.
-    # update the mapping for original inputs/outputs to the copied inputs/outputs
-    # it seems this should be done after properties are set. i've found odd cases where the socket data is seemingly offset in memory. maybe because of dynamic sockets?
-    # in the mapping dictionary, it lead to an output referencing itself. no idea how that works, but we want to make sure we have the most updated references
-    for node in list(src_nodes):
-        counter_part = map_og_to_copy[node]
-        for inp1, inp2 in zip(node.inputs, counter_part.inputs):
+    # update the mapping for original sockets to the copied sockets
+    # it seems that sockets can get offset in memory, meaning dictionary keys and values can get changed. this appears to happen especially when forming links.
+    # as a work around, let's store the socket indices and the node names, so that we have literal (str, int) variables to reference BPY data.
+    # when it comes to figuring out where to make links, we can create a "task list" using the literal variables, which are not subject to change.
+
+    # along with remapping sockets, we need to replace group input/output nodes with reroute nodes. for obvious reasons of course
+    for node, counter_part in zip(src_nodes, dst_nodes):
+        if isinstance(node, bpy.types.NodeGroupInput):
+            offsetY = 0
+            for out in node.outputs:
+                node_intersection = set(src_nodes).intersection(
+                    set(map(lambda a: a.to_node, out.links))
+                )
+                if not node_intersection:
+                    continue
+                reroute = dst_node_tree.nodes.new('NodeReroute')
+                reroute.name = 'group_input_placeholder'
+                reroute.label = out.name
+                reroute.parent = map_og_to_copy.get(node.parent, None)
+                reroute.location = node.location
+                reroute.location[1] += offsetY
+                route_out = reroute.outputs[0]
+                map_og_to_copy[out] = route_out
+                map_socket_indices[route_out] = 0
+
+                offsetY -= 30
+                reroute_group_placeholders.append(reroute)
+            continue
+
+        elif isinstance(node, bpy.types.NodeGroupOutput):
+            offsetY = 0 
+            for inp in node.inputs:
+                node_intersection = set(src_nodes).intersection(
+                    set(map(lambda a: a.from_node, inp.links))
+                )
+                if not node_intersection:
+                    continue
+                reroute = dst_node_tree.nodes.new('NodeReroute')
+                reroute.name = 'group_output_placeholder'
+                reroute.label = inp.name
+                reroute.parent = map_og_to_copy.get(node.parent, None)
+                reroute.location = node.location
+                reroute.location[1] += offsetY
+                route_inp = reroute.inputs[0]
+                map_og_to_copy[inp] = route_inp
+                map_socket_indices[route_inp] = 0
+                offsetY -= 30
+                reroute_group_placeholders.append(reroute)
+            continue
+
+
+        for n, inps in enumerate(zip(node.inputs, counter_part.inputs)):
+            inp1, inp2 = inps
+            if inp2.hide: continue
             map_og_to_copy[inp1] = inp2
-        for out1, out2 in zip(node.outputs, counter_part.outputs):
+            map_socket_indices[inp2] = n
+
+        for n, outs in enumerate(zip(node.outputs, counter_part.outputs)):
+            out1, out2 = outs
+            if out2.hide: continue
             map_og_to_copy[out1] = out2
+            map_socket_indices[out2] = n
 
     # 4.
-    # make the links!
-    for link in src_node_tree.links:
+    # prepare to make links by using literal variables to later access the necessary nodes and sockets.
+    # literal variables are not subject to change, so let's map out the links to make first, then actually make the links
+
+    link_tasks = []
+    for n, link in enumerate(src_node_tree.links):
         if not ((link.from_node in src_nodes) and (link.to_node in src_nodes)):
             continue
-        
-        from_socket = map_og_to_copy[link.from_socket]
-        to_socket = map_og_to_copy[link.to_socket]
+        out = map_og_to_copy[link.from_socket]
+        out_ind = map_socket_indices[out]
+        out_node = out.node.name
+
+        inp = map_og_to_copy[link.to_socket]
+        inp_ind = map_socket_indices[inp]
+        inp_node = inp.node.name
+
+        link_tasks.append((out_node, out_ind, inp_node, inp_ind))
+
+    # 5.
+    # make links!
+    for out_node, out_ind, inp_node, inp_ind in link_tasks:
+        from_socket = dst_node_tree.nodes[out_node].outputs[out_ind]
+        to_socket = dst_node_tree.nodes[inp_node].inputs[inp_ind]
+
         dst_node_tree.links.new(from_socket, to_socket)
+
+    while None in dst_nodes:
+        dst_nodes.remove(None)
+    dst_nodes.extend(reroute_group_placeholders)
 
     return dst_nodes
 
@@ -336,6 +436,7 @@ class node_OT_global_clipboard_paste(Operator):
     move_modal: BoolProperty(name='Move Modal', default=False, description='After pasting, use the mouse to position the nodes')
     last_pos: Vector = None
     original_offset: Vector = None
+    selected_nodes: list[bpy.types.Node] = None
 
     bl_options = {'UNDO'}
 
@@ -364,8 +465,7 @@ class node_OT_global_clipboard_paste(Operator):
     
     def modal(self, context, event):
         context.window.cursor_modal_set('SCROLL_XY')
-        node_tree = context.space_data.node_tree
-        nodes = [node for node in node_tree.nodes if node.select]
+        nodes = self.selected_nodes
 
         if event.type == 'MOUSEMOVE':
             self.update_node_position(context, event, nodes)
@@ -453,6 +553,7 @@ class node_OT_global_clipboard_paste(Operator):
         copied_node_tree.use_fake_user = True
 
         new_nodes = copy_nodes_to_node_tree(self, copied_node_tree, node_tree, list(copied_node_tree.nodes))
+        self.selected_nodes = new_nodes
 
         if self.setter_fail_count:
             self.report({'ERROR'}, f'Failed to set {self.setter_fail_count} value(s). Open console and report errors to developer!')
@@ -460,14 +561,8 @@ class node_OT_global_clipboard_paste(Operator):
         [setattr(node, 'select', False) for node in node_tree.nodes]
         [setattr(node, 'select', True) for node in new_nodes]
 
-        #middle_pos = get_center_location_of_nodes(new_nodes)
-
-        #for node in new_nodes:
-        #    if node.parent: continue
-        #    node.location += self.mouse_pos - middle_pos
-
         # center nodes on a timer. should we save dimension data in the copy buffer data text file?
-        bpy.app.timers.register(center_nodes_on_timer, first_interval=0.0001)
+        bpy.app.timers.register(center_nodes_on_timer, first_interval=0.01)
 
         map_og_to_copy.clear()
 
@@ -526,6 +621,7 @@ class global_copy_nodes_OT_temp_path_setter(Operator):
         preferences = context.preferences.addons[BASE_PACKAGE].preferences
         preferences.custom_copy_path = str(Path(bpy.app.tempdir).parent)
         return {'FINISHED'}
+
 
 class addon_preferences(AddonPreferences):
     bl_idname = BASE_PACKAGE
@@ -619,40 +715,30 @@ classes = [
     addon_preferences
 ]
 
-
 r, ur = bpy.utils.register_classes_factory(classes)
 
 addon_keymaps = []
 
-def register_keymaps():
-    wm = bpy.context.window_manager
-    kc = wm.keyconfigs.addon
-    km = kc.keymaps.new(name='Node Editor', space_type='NODE_EDITOR', region_type='WINDOW')
-    kmis = km.keymap_items
-
-    if not (kmi := kmis.get(node_OT_global_clipboard_copy.bl_idname)):
-        kmi = km.keymap_items.new(node_OT_global_clipboard_copy.bl_idname, 'C', 'PRESS', shift=True, ctrl=True, repeat=False)
-    else:
-        kmi.idname = node_OT_global_clipboard_copy.bl_idname
-    addon_keymaps.append((km, kmi))
-
-    if not (kmi := kmis.get(node_OT_global_clipboard_paste.bl_idname)):
-        kmi = km.keymap_items.new(node_OT_global_clipboard_paste.bl_idname, 'V', 'PRESS', shift=True, ctrl=True, repeat=False)
-    else:
-        kmi.idname = node_OT_global_clipboard_paste.bl_idname
-    addon_keymaps.append((km, kmi))
-
-def unregister_keymaps():
-    for km, kmi in addon_keymaps:
-        km.keymap_items.remove(kmi)
-    addon_keymaps.clear()
-
 def register():
     r()
     bpy.types.NODE_MT_node.append(draw_operators)
-    register_keymaps()
+
+    wm = bpy.context.window_manager
+    kc = wm.keyconfigs.addon
+
+    if kc:
+        km = kc.keymaps.new(name='Node Editor', space_type='NODE_EDITOR', region_type='WINDOW')
+
+        kmi = km.keymap_items.new(node_OT_global_clipboard_copy.bl_idname, 'C', 'PRESS', shift=True, ctrl=True, repeat=False)
+        addon_keymaps.append((km, kmi))
+
+        kmi = km.keymap_items.new(node_OT_global_clipboard_paste.bl_idname, 'V', 'PRESS', shift=True, ctrl=True, repeat=False)
+        addon_keymaps.append((km, kmi))
 
 def unregister():
     ur()
     bpy.types.NODE_MT_node.remove(draw_operators)
-    unregister_keymaps()
+
+    for km, kmi in addon_keymaps:
+        km.keymap_items.remove(kmi)
+    addon_keymaps.clear()
