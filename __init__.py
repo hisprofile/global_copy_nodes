@@ -257,8 +257,8 @@ def copy_nodes_to_node_tree(op: bpy.types.Operator, src_node_tree: bpy.types.Nod
     # 3.
     # update the mapping for original sockets to the copied sockets
     # it seems that sockets can get offset in memory, meaning dictionary keys and values can get changed. this appears to happen especially when forming links.
-    # as a work around, let's store the socket indices and the node names, so that we have literal (str, int) variables to reference BPY data.
-    # when it comes to figuring out where to make links, we can create a "task list" using the literal variables, which are not subject to change.
+    # as a work around, let's store the socket indices and the node names, so that we have str & int variables to reference BPY data.
+    # when it comes to figuring out where to make links, we can create a "task list" using the str & int variables, which are not subject to change.
 
     # along with remapping sockets, we need to replace group input/output nodes with reroute nodes. for obvious reasons of course
     for node, counter_part in zip(src_nodes, dst_nodes):
@@ -319,8 +319,8 @@ def copy_nodes_to_node_tree(op: bpy.types.Operator, src_node_tree: bpy.types.Nod
             map_socket_indices[out2] = n
 
     # 4.
-    # prepare to make links by using literal variables to later access the necessary nodes and sockets.
-    # literal variables are not subject to change, so let's map out the links to make first, then actually make the links
+    # prepare to make links by using str & int variables to later access the necessary nodes and sockets.
+    # str & int variables are not subject to change, so let's map out the links, then actually make the links
 
     link_tasks = []
     for n, link in enumerate(src_node_tree.links):
