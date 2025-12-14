@@ -2,7 +2,7 @@ bl_info = {
     "name" : "Global Copy Nodes",
     "description" : "Copy nodes across .blend projects",
     "author" : "hisanimations",
-    "version" : (1, 0, 2),
+    "version" : (1, 0, 3),
     "blender" : (3, 5, 0),
     "location" : "Node Editor > Global Copy Nodes",
     "support" : "COMMUNITY",
@@ -13,6 +13,7 @@ bl_info = {
 import bpy
 import os
 import traceback
+import numpy as np
 from uuid import uuid4
 from bpy.types import Operator, AddonPreferences
 from bpy.props import StringProperty, BoolProperty
@@ -36,8 +37,6 @@ BUFFER_NAME = 'global_copy_nodes_buffer_info'
 BUFFER_BLEND = 'node_copy_buffer.blend'
 mouse_pos: Vector = None
 node_tree_to_center: bpy.types.NodeTree = None
-
-iter_links = None
 
 map_og_to_copy: dict[bpy.types.Node, bpy.types.Node] = dict()
 
@@ -438,6 +437,10 @@ class node_OT_global_clipboard_paste(Operator):
     original_offset: Vector = None
     selected_nodes: list[bpy.types.Node] = None
 
+    loc_array: np.ndarray = None
+    mask_array: np.ndarray = None
+    node_count: int = 0
+
     bl_options = {'UNDO'}
 
     @classmethod
@@ -451,35 +454,46 @@ class node_OT_global_clipboard_paste(Operator):
     def invoke(self, context, event):
         global mouse_pos
         mouse_pos = self.get_mouse_in_region(context, [event.mouse_region_x, event.mouse_region_y])
-        self.original_offset = mouse_pos.copy()
-        self.last_pos = self.original_offset.copy()
+        self.original_offset = mouse_pos
+        self.last_pos = mouse_pos
         return self.execute(context)
     
-    def update_node_position(self, context, event, nodes):
+    def offset_node_position(self, context, event, offset):
+        node_tree: bpy.types.NodeTree = context.space_data.node_tree
+
         new_pos = self.get_mouse_in_region(context, [event.mouse_region_x, event.mouse_region_y])
-        offset = new_pos - self.last_pos
-        for node in nodes:
-            if node.parent: continue
-            node.location += offset
+        node_tree.nodes.foreach_get('location', self.loc_array.ravel())
+
+        offset = np.full((self.node_count, 2), offset, dtype=np.float32)
+        offset = np.where(
+            self.mask_array[:, None],
+            offset,
+            0.0
+        )
+        self.loc_array += offset
+
+        node_tree.nodes.foreach_set('location', self.loc_array.ravel())
+        context.area.tag_redraw()
         self.last_pos = new_pos
     
     def modal(self, context, event):
         context.window.cursor_modal_set('SCROLL_XY')
-        nodes = self.selected_nodes
 
         if event.type == 'MOUSEMOVE':
-            self.update_node_position(context, event, nodes)
+            new_pos = self.get_mouse_in_region(context, [event.mouse_region_x, event.mouse_region_y])
+            offset = new_pos - self.last_pos
+            self.offset_node_position(context, event, offset)
             return {'RUNNING_MODAL'}
 
         if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
-            self.update_node_position(context, event, nodes)
+            new_pos = self.get_mouse_in_region(context, [event.mouse_region_x, event.mouse_region_y])
+            offset = new_pos - self.last_pos
+            self.offset_node_position(context, event, offset)
             return {'PASS_THROUGH'}
 
         if event.type in {'RIGHTMOUSE', 'ESC'}:
             offset = self.original_offset - self.last_pos
-            for node in nodes:
-                if node.parent: continue
-                node.location += offset
+            self.offset_node_position(context, event, offset)
             self.move_modal = False
             context.window.cursor_modal_set('DEFAULT')
             return {'FINISHED'}
@@ -493,6 +507,9 @@ class node_OT_global_clipboard_paste(Operator):
 
     def execute(self, context):
         global node_tree_to_center
+        blend_data = context.blend_data
+        node_tree: bpy.types.NodeTree = context.space_data.node_tree
+        if node_tree == None: return {'CANCELLED'}
 
         self.setter_fail_count = 0
         preferences = context.preferences.addons[BASE_PACKAGE].preferences
@@ -509,9 +526,6 @@ class node_OT_global_clipboard_paste(Operator):
             last_path_data = os.path.join(WRITE_PATH, BUFFER_NAME)
 
         map_og_to_copy.clear()
-        blend_data = context.blend_data
-        node_tree = context.space_data.node_tree
-        if node_tree == None: return {'CANCELLED'}
 
         node_tree_to_center = node_tree
         tree_identifier = node_tree.bl_idname
@@ -523,9 +537,7 @@ class node_OT_global_clipboard_paste(Operator):
             with open(last_path_data, 'r') as file:
                 last_copied_path, unique_id, buffer_tree_identifier = file.read().split('\n')
 
-            try:
-                assert buffer_tree_identifier == tree_identifier
-            except AssertionError:
+            if buffer_tree_identifier != tree_identifier:
                 self.report({'ERROR'}, 'Copied node tree type does not match the active node tree!')
                 return {'CANCELLED'}
             
@@ -606,6 +618,9 @@ class node_OT_global_clipboard_paste(Operator):
         
         if self.move_modal:
             context.window_manager.modal_handler_add(self)
+            self.node_count = len(node_tree.nodes)
+            self.loc_array = np.empty((self.node_count, 2), dtype=np.float32)
+            self.mask_array = np.array([(node in new_nodes) and not node.parent for node in node_tree.nodes], dtype=bool)
             return {'RUNNING_MODAL'}
         
         return {'FINISHED'}
