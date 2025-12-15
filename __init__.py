@@ -2,7 +2,7 @@ bl_info = {
     "name" : "Global Copy Nodes",
     "description" : "Copy nodes across .blend projects",
     "author" : "hisanimations",
-    "version" : (1, 0, 3),
+    "version" : (1, 0, 4),
     "blender" : (3, 5, 0),
     "location" : "Node Editor > Global Copy Nodes",
     "support" : "COMMUNITY",
@@ -75,7 +75,8 @@ def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_st
             'node',
             'display_shape',
             'internal_links',
-            'location_absolute'
+            'location_absolute',
+            'node_tree'
             }: continue
         if prop_id.startswith('bl_'): continue
         
@@ -183,22 +184,6 @@ def get_center_location_of_nodes(nodes: Iterable[bpy.types.Node]) -> Vector:
     return middle
 
 
-def center_nodes_on_timer():
-    '''
-    Register this function on a timer with a small interval, letting the nodes draw.
-    Access the node tree to modify using the global variable "node_tree_to_center", and use the global variable "mouse_pos" to know where to center to
-    '''
-    node_tree = node_tree_to_center
-    nodes = [node for node in node_tree.nodes if node.select]
-
-    middle_pos = get_center_location_of_nodes(nodes)
-
-    for node in nodes:
-        if node.parent: continue
-        node.location += mouse_pos - middle_pos
-
-    return None
-
 def copy_nodes_to_node_tree(op: bpy.types.Operator, src_node_tree: bpy.types.NodeTree, dst_node_tree: bpy.types.NodeTree, src_nodes: list[bpy.types.Node]) -> list[bpy.types.Node]:
     '''
     Recursively copy nodes from one node tree into another, using bl_rna properties and a list of source nodes
@@ -219,7 +204,14 @@ def copy_nodes_to_node_tree(op: bpy.types.Operator, src_node_tree: bpy.types.Nod
     # 1.
     # make copies of nodes, and map the original to the copies
     for node in src_nodes:
-        if isinstance(node, (bpy.types.NodeGroupInput, bpy.types.NodeGroupOutput)):
+        if isinstance(
+            node, 
+            (
+                bpy.types.NodeGroupInput,
+                bpy.types.NodeGroupOutput,
+                bpy.types.CompositorNodeRLayers
+            )
+        ):
             dst_nodes.append(None)
             continue
         new_node = dst_node_tree.nodes.new(node.bl_idname)
@@ -234,12 +226,20 @@ def copy_nodes_to_node_tree(op: bpy.types.Operator, src_node_tree: bpy.types.Nod
     for node in filter(lambda a: hasattr(a, 'paired_output'), src_nodes):
         new_node = map_og_to_copy[node]
         new_node.pair_with_output(map_og_to_copy[node.paired_output])
+        
 
     # 2.
     # recursively set the properties of the copied nodes, using the original nodes as a reference
     # set the parent to make positioning more convenient
     for node, new_node in zip(src_nodes, dst_nodes):
-        if isinstance(node, (bpy.types.NodeGroupInput, bpy.types.NodeGroupOutput)):
+        if isinstance(
+            node, 
+            (
+                bpy.types.NodeGroupInput,
+                bpy.types.NodeGroupOutput,
+                bpy.types.CompositorNodeRLayers
+            )
+        ):
             continue
         setattr(new_node, 'parent', map_og_to_copy.get(node.parent, None))
 
@@ -261,7 +261,7 @@ def copy_nodes_to_node_tree(op: bpy.types.Operator, src_node_tree: bpy.types.Nod
 
     # along with remapping sockets, we need to replace group input/output nodes with reroute nodes. for obvious reasons of course
     for node, counter_part in zip(src_nodes, dst_nodes):
-        if isinstance(node, bpy.types.NodeGroupInput):
+        if isinstance(node, (bpy.types.NodeGroupInput, bpy.types.CompositorNodeRLayers)):
             offsetY = 0
             for out in node.outputs:
                 node_intersection = set(src_nodes).intersection(
@@ -321,7 +321,15 @@ def copy_nodes_to_node_tree(op: bpy.types.Operator, src_node_tree: bpy.types.Nod
     # prepare to make links by using str & int variables to later access the necessary nodes and sockets.
     # str & int variables are not subject to change, so let's map out the links, then actually make the links
 
-    link_tasks = []
+    link_tasks: list[
+        tuple[
+            str,
+            int,
+            str,
+            int
+        ]
+    ] = list()
+
     for n, link in enumerate(src_node_tree.links):
         if not ((link.from_node in src_nodes) and (link.to_node in src_nodes)):
             continue
@@ -458,11 +466,8 @@ class node_OT_global_clipboard_paste(Operator):
         self.last_pos = mouse_pos
         return self.execute(context)
     
-    def offset_node_position(self, context, event, offset):
+    def offset_node_position(self, context, offset):
         node_tree: bpy.types.NodeTree = context.space_data.node_tree
-
-        new_pos = self.get_mouse_in_region(context, [event.mouse_region_x, event.mouse_region_y])
-        node_tree.nodes.foreach_get('location', self.loc_array.ravel())
 
         offset = np.full((self.node_count, 2), offset, dtype=np.float32)
         offset = np.where(
@@ -474,26 +479,28 @@ class node_OT_global_clipboard_paste(Operator):
 
         node_tree.nodes.foreach_set('location', self.loc_array.ravel())
         context.area.tag_redraw()
-        self.last_pos = new_pos
     
     def modal(self, context, event):
         context.window.cursor_modal_set('SCROLL_XY')
+        new_pos = self.get_mouse_in_region(context, [event.mouse_region_x, event.mouse_region_y])
 
         if event.type == 'MOUSEMOVE':
             new_pos = self.get_mouse_in_region(context, [event.mouse_region_x, event.mouse_region_y])
             offset = new_pos - self.last_pos
-            self.offset_node_position(context, event, offset)
+            self.offset_node_position(context, offset)
+            self.last_pos = new_pos
             return {'RUNNING_MODAL'}
 
         if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
             new_pos = self.get_mouse_in_region(context, [event.mouse_region_x, event.mouse_region_y])
             offset = new_pos - self.last_pos
-            self.offset_node_position(context, event, offset)
+            self.offset_node_position(context, offset)
+            self.last_pos = new_pos
             return {'PASS_THROUGH'}
 
         if event.type in {'RIGHTMOUSE', 'ESC'}:
             offset = self.original_offset - self.last_pos
-            self.offset_node_position(context, event, offset)
+            self.offset_node_position(context, offset)
             self.move_modal = False
             context.window.cursor_modal_set('DEFAULT')
             return {'FINISHED'}
@@ -573,14 +580,21 @@ class node_OT_global_clipboard_paste(Operator):
         [setattr(node, 'select', False) for node in node_tree.nodes]
         [setattr(node, 'select', True) for node in new_nodes]
 
-        # center nodes on a timer. should we save dimension data in the copy buffer data text file?
-        bpy.app.timers.register(center_nodes_on_timer, first_interval=0.01)
-
         map_og_to_copy.clear()
 
         if not preferences.link_to_scene:
             if self.move_modal:
+                print('Global Copy Nodes: Drawing window to get node dimensions')
+                bpy.ops.wm.redraw_timer(type='DRAW')
                 context.window_manager.modal_handler_add(self)
+                self.node_count = len(node_tree.nodes)
+                self.loc_array = np.empty((self.node_count, 2), dtype=np.float32)
+                self.mask_array = np.array([(node in new_nodes) and not node.parent for node in node_tree.nodes], dtype=bool)
+
+                center = get_center_location_of_nodes(new_nodes)
+                offset = self.last_pos - center
+
+                self.offset_node_position(context, offset)
                 return {'RUNNING_MODAL'}
             return {'FINISHED'}
         
@@ -617,10 +631,18 @@ class node_OT_global_clipboard_paste(Operator):
             [link_to_collection.objects.link(obj) for obj in objs]
         
         if self.move_modal:
+            print('Global Copy Nodes: Drawing region to get node dimensions')
+            bpy.ops.wm.redraw_timer(type='DRAW')
             context.window_manager.modal_handler_add(self)
             self.node_count = len(node_tree.nodes)
             self.loc_array = np.empty((self.node_count, 2), dtype=np.float32)
             self.mask_array = np.array([(node in new_nodes) and not node.parent for node in node_tree.nodes], dtype=bool)
+            node_tree.nodes.foreach_get('location', self.loc_array.ravel())
+
+            center = get_center_location_of_nodes(new_nodes)
+            offset = self.last_pos - center
+
+            self.offset_node_position(context, offset)
             return {'RUNNING_MODAL'}
         
         return {'FINISHED'}
@@ -713,7 +735,6 @@ class addon_preferences(AddonPreferences):
                 node_OT_global_clipboard_copy,
                 node_OT_global_clipboard_paste
             ]:
-                
                 if not (kmi := km.keymap_items.get(operator.bl_idname)):
                     continue
                 draw_kmi([], kc, km, kmi, layout, 0)
