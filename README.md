@@ -4,7 +4,7 @@ Global Copy Nodes makes it extremely easy to copy nodes across different .blend 
 ## Add-on Preferences
 ### Custom Copy Path
 - Use Custom Copy Path (Boolean, default `False`)
-  - Enables the use of a custom copy path, allowing you to copy across different.blend versions
+  - Enables the use of a custom copy path, allowing you to copy across different Blender versions
 - Custom Copy Path (String, directory type)
   - The path to use to store the global copy buffer
 

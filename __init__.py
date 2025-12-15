@@ -2,7 +2,7 @@ bl_info = {
     "name" : "Global Copy Nodes",
     "description" : "Copy nodes across .blend projects",
     "author" : "hisanimations",
-    "version" : (1, 0, 4),
+    "version" : (1, 0, 5),
     "blender" : (3, 5, 0),
     "location" : "Node Editor > Global Copy Nodes",
     "support" : "COMMUNITY",
@@ -35,10 +35,8 @@ DEFAULT_COLLECTION_PROP_NAME = 'global_copy_nodes_default_collection'
 UNIQUE_ID_PROP_NAME = 'global_node_copy_unique_id'
 BUFFER_NAME = 'global_copy_nodes_buffer_info'
 BUFFER_BLEND = 'node_copy_buffer.blend'
-mouse_pos: Vector = None
-node_tree_to_center: bpy.types.NodeTree = None
 
-map_og_to_copy: dict[bpy.types.Node, bpy.types.Node] = dict()
+map_og_to_copy: dict[bpy.types.bpy_struct, bpy.types.bpy_struct] = dict()
 
 def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_struct, copy: bpy.types.bpy_struct, properties: bpy.types.bpy_prop_collection, surface_scan: bool = False) -> None:
     '''
@@ -99,7 +97,7 @@ def recursive_property_setter(op: bpy.types.Operator, original: bpy.types.bpy_st
                     continue
                     # this seems to happen with the Field to Grid node.
                     # the node's "active_item" attribute expects a bpy.types.RepeatItem type, yet when accessed, 
-                    # it's clearly grabbing from the node's "grid_items" collection.
+                    # it's clearly grabbing from the node's "grid_items" collection of bpy.types.GeometryNodeFieldToGridItem
 
                     # this is the first time i've seen a property return a different value type than what it's expected to have.
                     # so as a check, just make sure that the value we want to set with matches the type the pointer expects. otherwise, exception
@@ -385,7 +383,7 @@ class node_OT_global_clipboard_copy(Operator):
         map_og_to_copy.clear()
 
         blend_data = context.blend_data
-        node_tree: bpy.types.NodeTree = context.space_data.node_tree
+        node_tree: bpy.types.NodeTree = context.space_data.edit_tree
 
         if node_tree == None: return {'CANCELLED'}
 
@@ -467,7 +465,7 @@ class node_OT_global_clipboard_paste(Operator):
         return self.execute(context)
     
     def offset_node_position(self, context, offset):
-        node_tree: bpy.types.NodeTree = context.space_data.node_tree
+        node_tree: bpy.types.NodeTree = context.space_data.edit_tree
 
         offset = np.full((self.node_count, 2), offset, dtype=np.float32)
         offset = np.where(
@@ -515,7 +513,7 @@ class node_OT_global_clipboard_paste(Operator):
     def execute(self, context):
         global node_tree_to_center
         blend_data = context.blend_data
-        node_tree: bpy.types.NodeTree = context.space_data.node_tree
+        node_tree: bpy.types.NodeTree = context.space_data.edit_tree
         if node_tree == None: return {'CANCELLED'}
 
         self.setter_fail_count = 0
@@ -554,7 +552,6 @@ class node_OT_global_clipboard_paste(Operator):
             if unique_id == current_unique_id:
                 copied_node_tree = existing_node_buffer
             else:
-                #print('unique id does not match current!', unique_id, current_unique_id)
                 if existing_node_buffer:
                     blend_data.node_groups.remove(existing_node_buffer)
                 if bpy.app.version >= (5, 0, 0):
@@ -582,57 +579,42 @@ class node_OT_global_clipboard_paste(Operator):
 
         map_og_to_copy.clear()
 
-        if not preferences.link_to_scene:
-            if self.move_modal:
-                print('Global Copy Nodes: Drawing window to get node dimensions')
-                bpy.ops.wm.redraw_timer(type='DRAW')
-                context.window_manager.modal_handler_add(self)
-                self.node_count = len(node_tree.nodes)
-                self.loc_array = np.empty((self.node_count, 2), dtype=np.float32)
-                self.mask_array = np.array([(node in new_nodes) and not node.parent for node in node_tree.nodes], dtype=bool)
+        if preferences.link_to_scene:
+            from bpy_extras import id_map_utils
 
-                center = get_center_location_of_nodes(new_nodes)
-                offset = self.last_pos - center
+            # 1.
+            # get all IDs associated with the imported nodes
+            ref_map: dict[bpy.types.ID, set[bpy.types.ID]] = id_map_utils.get_id_reference_map()
+            referenced_ids: set[bpy.types.ID] = id_map_utils.get_all_referenced_ids(copied_node_tree, ref_map)
 
-                self.offset_node_position(context, offset)
-                return {'RUNNING_MODAL'}
-            return {'FINISHED'}
-        
-        from bpy_extras import id_map_utils
+            # 2.
+            # filter objects and collections
+            objs: set[bpy.types.Object] = set(filter(lambda a: isinstance(a, bpy.types.Object), referenced_ids))
+            collections: set[bpy.types.Collection] = set(filter(lambda a: isinstance(a, bpy.types.Collection), referenced_ids))
 
-        # 1.
-        # get all IDs associated with the imported nodes
-        ref_map: dict[bpy.types.ID, set[bpy.types.ID]] = id_map_utils.get_id_reference_map()
-        referenced_ids: set[bpy.types.ID] = id_map_utils.get_all_referenced_ids(copied_node_tree, ref_map)
+            # 3.
+            # more filtering
+            [collections.difference_update(set(col.children_recursive)) for col in list(collections)] # get only the top collections
+            [objs.difference_update(set(col.all_objects)) for col in collections] # get objects that are not a part of any attached collection
+            collections.difference_update(set(context.scene.collection.children_recursive)) # remove collections that are associated with the active scene (if pasted more than once from the same copy)
+            objs.difference_update(set(context.scene.objects)) # remove objects that are associated with the active scene (if pasted more than once from the same copy)
 
-        # 2.
-        # filter objects and collections
-        objs: set[bpy.types.Object] = set(filter(lambda a: isinstance(a, bpy.types.Object), referenced_ids))
-        collections: set[bpy.types.Collection] = set(filter(lambda a: isinstance(a, bpy.types.Collection), referenced_ids))
+            # 4.
+            # link to scene if there are any valid objects or collections
+            if objs or collections:
+                link_to_collection = context.scene.collection
+                if preferences.create_collections:
+                    if not (link_to_collection := context.scene.get('global_copy_nodes_default_collection')):
+                        link_to_collection = blend_data.collections.new(DEFAULT_COLLECTION_NAME)
+                        context.scene['global_copy_nodes_default_collection'] = link_to_collection
+                        context.scene.collection.children.link(link_to_collection)
 
-        # 3.
-        # more filtering
-        [collections.difference_update(set(col.children_recursive)) for col in list(collections)] # get only the top collections
-        [objs.difference_update(set(col.all_objects)) for col in collections] # get objects that are not a part of any attached collection
-        collections.difference_update(set(context.scene.collection.children_recursive)) # remove collections that are associated with the active scene (if pasted more than once from the same copy)
-        objs.difference_update(set(context.scene.objects)) # remove objects that are associated with the active scene (if pasted more than once from the same copy)
-
-        # 4.
-        # link to scene if there are any valid objects or collections
-        if objs or collections:
-            link_to_collection = context.scene.collection
-            if preferences.create_collections:
-                if not (link_to_collection := context.scene.get('global_copy_nodes_default_collection')):
-                    link_to_collection = blend_data.collections.new(DEFAULT_COLLECTION_NAME)
-                    context.scene['global_copy_nodes_default_collection'] = link_to_collection
-                    context.scene.collection.children.link(link_to_collection)
-
-            [link_to_collection.children.link(col) for col in collections]
-            [link_to_collection.objects.link(obj) for obj in objs]
+                [link_to_collection.children.link(col) for col in collections]
+                [link_to_collection.objects.link(obj) for obj in objs]
         
         if self.move_modal:
             print('Global Copy Nodes: Drawing region to get node dimensions')
-            bpy.ops.wm.redraw_timer(type='DRAW')
+            bpy.ops.wm.redraw_timer(type='DRAW', iterations=1)
             context.window_manager.modal_handler_add(self)
             self.node_count = len(node_tree.nodes)
             self.loc_array = np.empty((self.node_count, 2), dtype=np.float32)
