@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "global_copy_nodes"
-version = "1.0.5"
+version = "1.0.6"
 name = "Global Copy Nodes"
 tagline = "Copy nodes across .blend projects"
 maintainer = "hisprofile029@gmail.com"
@@ -12,6 +12,7 @@ website = "https://github.com/hisprofile/global_copy_nodes"
 tags = ["System", "Node"]
 
 blender_version_min = "4.2.0"
+blender_version_max = "5.0.1"
 
 license = [
   "SPDX:GPL-3.0-or-later",

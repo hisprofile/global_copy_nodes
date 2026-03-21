@@ -2,7 +2,7 @@ bl_info = {
     "name" : "Global Copy Nodes",
     "description" : "Copy nodes across .blend projects",
     "author" : "hisanimations",
-    "version" : (1, 0, 5),
+    "version" : (1, 0, 6),
     "blender" : (3, 5, 0),
     "location" : "Node Editor > Global Copy Nodes",
     "support" : "COMMUNITY",
@@ -207,7 +207,8 @@ def copy_nodes_to_node_tree(op: bpy.types.Operator, src_node_tree: bpy.types.Nod
             (
                 bpy.types.NodeGroupInput,
                 bpy.types.NodeGroupOutput,
-                bpy.types.CompositorNodeRLayers
+                bpy.types.CompositorNodeRLayers,
+                bpy.types.GeometryNodeViewer
             )
         ):
             dst_nodes.append(None)
@@ -235,7 +236,8 @@ def copy_nodes_to_node_tree(op: bpy.types.Operator, src_node_tree: bpy.types.Nod
             (
                 bpy.types.NodeGroupInput,
                 bpy.types.NodeGroupOutput,
-                bpy.types.CompositorNodeRLayers
+                bpy.types.CompositorNodeRLayers,
+                bpy.types.GeometryNodeViewer
             )
         ):
             continue
@@ -351,6 +353,7 @@ def copy_nodes_to_node_tree(op: bpy.types.Operator, src_node_tree: bpy.types.Nod
 
     while None in dst_nodes:
         dst_nodes.remove(None)
+
     dst_nodes.extend(reroute_group_placeholders)
 
     return dst_nodes
